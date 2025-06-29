@@ -3,8 +3,7 @@ package main
 import (
 	"fmt"
 	"net"
-	"io"
-	"os"
+	"strings"
 )
 
 func main(){
@@ -14,6 +13,26 @@ func main(){
 		fmt.Println("Error listening:", err)
 		return
 	}
+	aof, err := NewAof("database.aof")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer aof.Close()
+
+	aof.Read(func(value Value) {
+		command := strings.ToUpper(value.array[0].bulk)
+		args := value.array[1:]
+
+		handler, ok := Handlers[command]
+		if !ok {
+			fmt.Println("Invalid command: ", command)
+			return
+		}
+
+		handler(args)
+	})
+
 	defer l.Close()
 	
 	fmt.Println("Waiting for connections...")
@@ -24,17 +43,38 @@ func main(){
 	}
 	defer connection.Close() // close connection once finished
 	for{
-		buf := make([]byte,1024)
+		resp := NewResp(connection)
+		value,err := resp.Read()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		if value.typ != "array" {
+			fmt.Println("Invalid request, expected array")
+			continue
+		}
+		if len(value.array) == 0 {
+			fmt.Println("Invalid request, expected array length > 0")
+			continue
+		}
+		command := strings.ToUpper(value.array[0].bulk)
+		args := value.array[1:]
 
-		_,err := connection.Read(buf)
-		if err != nil{
-			if err == io.EOF{
-				break
-			}
-			fmt.Println("error reading from client: ", err.Error())
-        	os.Exit(1)
+		
+		fmt.Println(value)
+		writer := NewWriter(connection)
+		handler,ok := Handlers[command]
+
+		if !ok {
+			fmt.Println("Invalid command: ", command)
+			writer.Write(Value{typ: "string", str: ""})
+			continue
+		}
+		if command == "SET" || command == "HSET" {
+			aof.Write(value)
 		}
 
-		connection.Write([]byte("+OK\r\n"))
+		result := handler(args)
+		writer.Write(result)
 	}	
 }
